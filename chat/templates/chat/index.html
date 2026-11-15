@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>МТС Energytool — консультант</title>
+<style>
+  :root { --red:#e30611; --bg:#f2f3f7; --ink:#1d2023; --muted:#626c77; --card:#fff; --line:#e2e5ea; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161a; --ink:#eceef1; --muted:#9aa3ad; --card:#1f2227; --line:#2f343b; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; height:100vh; display:flex; flex-direction:column; background:var(--bg); color:var(--ink);
+         font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  header { display:flex; align-items:center; gap:12px; padding:12px 16px; background:var(--card); border-bottom:1px solid var(--line); }
+  .logo { background:var(--red); color:#fff; font-weight:700; padding:2px 10px; border-radius:6px; letter-spacing:2px; }
+  header h1 { font-size:16px; margin:0; flex:1; }
+  header label { font-size:14px; color:var(--muted); display:flex; align-items:center; gap:6px; cursor:pointer; }
+  button { font:inherit; cursor:pointer; border:0; border-radius:10px; padding:8px 14px; }
+  .ghost { background:transparent; color:var(--ink); border:1px solid var(--line); }
+  .primary { background:var(--red); color:#fff; }
+  .primary:disabled { opacity:.5; cursor:default; }
+  #log { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .msg { max-width:min(720px,88%); padding:10px 14px; border-radius:14px; white-space:pre-wrap; word-wrap:break-word; }
+  .user { align-self:flex-end; background:var(--red); color:#fff; border-bottom-right-radius:4px; }
+  .assistant { align-self:flex-start; background:var(--card); border:1px solid var(--line); border-bottom-left-radius:4px; }
+  .debug { display:none; margin-top:8px; padding-top:8px; border-top:1px dashed var(--line); font-size:12.5px; color:var(--muted); white-space:normal; }
+  body.debug-on .debug { display:block; }
+  .debug ul { margin:4px 0 0; padding-left:18px; }
+  .notice { align-self:center; font-size:14px; color:var(--muted); background:var(--card); border:1px solid var(--line); border-radius:10px; padding:6px 12px; }
+  form { display:flex; gap:8px; padding:12px 16px; background:var(--card); border-top:1px solid var(--line); }
+  textarea { flex:1; resize:none; font:inherit; color:var(--ink); background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  textarea:focus-visible, button:focus-visible, input:focus-visible { outline:2px solid var(--red); outline-offset:2px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">МТС</span>
+  <h1>Energytool — консультант</h1>
+  <label><input type="checkbox" id="debugToggle"> Режим отладки</label>
+  <button class="ghost" id="newDialog" type="button">Новый диалог</button>
+</header>
+<main id="log" aria-live="polite"></main>
+<form id="form">
+  <textarea id="input" rows="2" maxlength="2000" placeholder="Опишите задачу своими словами…" aria-label="Сообщение"></textarea>
+  <button class="primary" id="send" type="submit">Отправить</button>
+</form>
+{{ history|json_script:"history" }}
+<script>
+const log = document.getElementById("log");
+const input = document.getElementById("input");
+const sendBtn = document.getElementById("send");
+const toggle = document.getElementById("debugToggle");
+
+function csrf() {
+  const m = document.cookie.match(/(?:^|; )csrftoken=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : "";
+}
+function scrollDown() { log.scrollTop = log.scrollHeight; }
+
+function addMessage(role, text, meta) {
+  const el = document.createElement("div");
+  el.className = "msg " + role;
+  el.textContent = text;
+  if (role === "assistant" && meta) {
+    const dbg = document.createElement("div");
+    dbg.className = "debug";
+    const time = document.createElement("div");
+    time.textContent = "Время ответа: " + (meta.elapsed_ms != null ? (meta.elapsed_ms / 1000).toFixed(2) + " с" : "—");
+    const title = document.createElement("div");
+    title.textContent = "Документы базы знаний:";
+    const list = document.createElement("ul");
+    (meta.sources || []).forEach(s => { const li = document.createElement("li"); li.textContent = s; list.appendChild(li); });
+    dbg.append(time, title, list);
+    el.appendChild(dbg);
+  }
+  log.appendChild(el);
+  scrollDown();
+  return el;
+}
+function addNotice(text) {
+  const el = document.createElement("div");
+  el.className = "notice";
+  el.textContent = text;
+  log.appendChild(el);
+  scrollDown();
+}
+
+JSON.parse(document.getElementById("history").textContent).forEach(m => addMessage(m.role, m.content, m));
+if (!log.children.length) addMessage("assistant", "Здравствуйте! Расскажите, какую задачу по электроэнергии нужно решить, и я подскажу подходящее решение МТС Energytool.");
+
+try { toggle.checked = localStorage.getItem("debug") === "1"; } catch (e) {}
+document.body.classList.toggle("debug-on", toggle.checked);
+toggle.addEventListener("change", () => {
+  document.body.classList.toggle("debug-on", toggle.checked);
+  try { localStorage.setItem("debug", toggle.checked ? "1" : "0"); } catch (e) {}
+});
+
+async function api(url, body) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRFToken": csrf() },
+                               body: JSON.stringify(body || {}) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || "Ошибка сервера");
+  return data;
+}
+
+document.getElementById("form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  sendBtn.disabled = true;
+  addMessage("user", text);
+  const pending = addMessage("assistant", "Печатает…");
+  try {
+    const data = await api("/api/chat/", { message: text });
+    pending.remove();
+    addMessage("assistant", data.answer, data);
+    if (data.lead_created) addNotice("Заявка передана менеджеру");
+  } catch (err) {
+    pending.textContent = err.message;
+  } finally {
+    sendBtn.disabled = false;
+    input.focus();
+  }
+});
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("form").requestSubmit(); }
+});
+
+document.getElementById("newDialog").addEventListener("click", async () => {
+  try { await api("/api/new/"); } catch (err) { return; }
+  log.replaceChildren();
+  addMessage("assistant", "Начинаем с чистого листа. Расскажите, какую задачу нужно решить.");
+  input.focus();
+});
+</script>
+</body>
+</html>

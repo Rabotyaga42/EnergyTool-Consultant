@@ -1,0 +1,16 @@
+services:
+  app: # имя вашего сервиса
+    build: .
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - ./data:/app/data:ro
+      - db:/app/db
+volumes:
+  db:
