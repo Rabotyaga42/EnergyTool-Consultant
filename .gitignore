@@ -1,4 +1,3 @@
-.idea
 .env
 __pycache__/
 *.pyc
@@ -6,3 +5,8 @@ db/*.sqlite3
 staticfiles/
 # База знаний передаётся только для задания и не публикуется
 data/*.zip
+# Idea
+.idea/workspace.xml
+.idea/usage.statistics.xml
+.idea/shelf/
+.idea/dictionaries/
