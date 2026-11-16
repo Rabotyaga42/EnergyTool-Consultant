@@ -78,8 +78,9 @@ SYSTEM_PROMPT = """Ты — ИИ-консультант сайта МТС Energy
 МТС не является энергосбытовой компанией.
 7. Если клиент готов к контакту или нужен расчёт по объекту — предложи связаться с менеджером и попроси недостающее из: \
 ФИО, телефон, название компании. Если клиент не хочет оставлять телефон — не настаивай, помоги по существу. \
-Не обещай точное время звонка и имя специалиста. Когда все три данных получены — поблагодари и скажи, \
-что заявка передана менеджеру.
+Не обещай точное время звонка и имя специалиста. Говорить, что заявка передана менеджеру, можно ТОЛЬКО если ниже \
+указано «Заявка в системе: ДА». Если ДА — поблагодари клиента и сообщи, что заявка передана менеджеру. \
+Если НЕТ — не утверждай, что заявка передана; попроси недостающие данные.
 8. Диалог: отвечай на последнюю реплику пользователя с учётом истории; не повторяй уже заданные вопросы.
 9. Отвечай по-русски, кратко: как правило до 150 слов, без таблиц и длинных списков, без ссылок на «фрагменты» и номера документов.
 10. Служебный блок. Если клиент в этом диалоге называл ФИО, телефон или компанию, в самом конце ответа добавь блок \
@@ -89,6 +90,14 @@ SYSTEM_PROMPT = """Ты — ИИ-консультант сайта МТС Energy
 SUMMARY_PROMPT = """Составь краткое резюме диалога клиента с консультантом МТС Energytool для менеджера: \
 задача клиента, что известно об объекте и параметрах, какие решения обсуждались, какие вопросы остались открытыми. \
 Только факты из диалога, без выдумок. Не более 120 слов, простым текстом без разметки."""
+
+
+EXTRACT_PROMPT = """Из диалога клиента с консультантом извлеки контакты КЛИЕНТА. Верни ТОЛЬКО JSON без пояснений: \
+{"full_name": "...", "phone": "...", "company": "..."}. full_name — ФИО или имя клиента, phone — номер телефона, \
+company — название организации клиента (ИП и самозанятость тоже подходят). Если значение не названо клиентом — пустая строка. \
+Ничего не выдумывай и не бери данные консультанта или МТС."""
+
+CONTACT_WORDS = re.compile(r"ФИО|телефон|компани|организаци|контакт|менеджер|заявк", re.I)
 
 
 # ---------------------------------------------------------------- HTTP
@@ -333,7 +342,7 @@ def chat_completion(messages, max_tokens=None):
     return clean(result["choices"][0]["message"].get("content") or "")
 
 
-def generate_reply(dialog, known_contact):
+def generate_reply(dialog, known_contact, lead_registered=False):
     """dialog — список {'role', 'content'}, последняя запись — реплика пользователя.
 
     Возвращает (текст ответа, найденные поля контакта, использованные источники).
@@ -344,6 +353,7 @@ def generate_reply(dialog, known_contact):
     known = "; ".join(f"{label}: {known_contact[key]}" for key, label in
                       (("full_name", "ФИО"), ("phone", "телефон"), ("company", "компания")) if known_contact.get(key))
     system = SYSTEM_PROMPT + "\n\nУже известные контакты клиента: " + (known or "нет") + \
+        "\nЗаявка в системе: " + ("ДА, оформлена" if lead_registered else "НЕТ, ещё не оформлена") + \
         "\n\nФрагменты базы знаний:\n\n" + context
     answer = ""
     for attempt in range(2):
@@ -361,13 +371,65 @@ def summarize(dialog):
     transcript = "\n".join(("Клиент: " if m["role"] == "user" else "Консультант: ") + m["content"] for m in dialog)
     try:
         summary = chat_completion([{"role": "system", "content": SUMMARY_PROMPT},
-                                   {"role": "user", "content": transcript}], max_tokens=600)
+                                   {"role": "user", "content": transcript}])
         if summary:
             return summary
     except Exception as exc:
         print(f"Резюме: {type(exc).__name__}", file=sys.stderr)
     return "Резюме не сформировано. Реплики клиента: " + " | ".join(
         m["content"] for m in dialog if m["role"] == "user")
+
+
+def extract_contact(dialog):
+    """Отдельный запрос к LLM: надёжно достаёт ФИО, телефон и компанию из последних реплик."""
+    transcript = "\n".join(("Клиент: " if m["role"] == "user" else "Консультант: ") + m["content"]
+                           for m in dialog[-8:])
+    try:
+        raw = chat_completion([{"role": "system", "content": EXTRACT_PROMPT},
+                               {"role": "user", "content": transcript}])
+        match = re.search(r"\{.*\}", raw, re.S)
+        if not match:
+            print(f"Извлечение контактов: нет JSON в ответе модели ({raw[:80]!r})", file=sys.stderr)
+        data = json.loads(match.group(0)) if match else {}
+        if isinstance(data, dict):
+            return {k: str(data.get(k) or "").strip() for k in ("full_name", "phone", "company")}
+    except Exception as exc:
+        print(f"Извлечение контактов: {type(exc).__name__}: {exc}", file=sys.stderr)
+    return {}
+
+
+PHONE = re.compile(r"\+?\d[\d\s\-()]{8,}\d")
+COMPANY = re.compile(r"\b((?:ООО|АО|ПАО|ЗАО|ОАО|НКО|ТОО|ИП)\s*[«\"“]?[^,.;\n«»\"”]{2,60}[»\"”]?)"
+                     r"|(?i:компани[яиею]|организаци[яиею]|фирм[аыу]|работаю в)\s*[:\-—]?\s*[«\"“]?([^,.;\n«»\"”]{2,60})")
+NAME = re.compile(r"(?i:меня зовут|ФИО|имя|я)\s*[:\-—]?\s*([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){0,2})")
+PLAIN_NAME = re.compile(r"^\s*([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2})\s*[,;]")
+
+
+def extract_contact_fallback(dialog):
+    """Запасное извлечение без LLM (регулярные выражения) на случай пустого или неверного ответа модели."""
+    found = {"full_name": "", "phone": "", "company": ""}
+    for message in dialog[-8:]:
+        if message["role"] != "user":
+            continue
+        text = message["content"]
+        for match in PHONE.finditer(text):
+            if normalize_phone(match.group(0)):
+                found["phone"] = match.group(0).strip()
+        company = COMPANY.search(text)
+        if company:
+            found["company"] = (company.group(1) or company.group(2)).strip()
+        name = NAME.search(text) or PLAIN_NAME.search(text)
+        if name:
+            found["full_name"] = name.group(1).strip()
+    return found
+
+
+def needs_contact_extraction(session, dialog):
+    """Извлекаем контакты только на этапе сбора: есть телефон в реплике, уже собраны данные или консультант о них просил."""
+    last = dialog[-1]["content"]
+    previous = next((m["content"] for m in reversed(dialog[:-1]) if m["role"] == "assistant"), "")
+    return (len(re.sub(r"\D", "", last)) >= 10 or bool(CONTACT_WORDS.search(previous))
+            or bool(session.contact_name or session.contact_phone or session.contact_company))
 
 
 # ---------------------------------------------------------------- диалоги и заявки
@@ -410,7 +472,7 @@ def create_lead_if_ready(session, dialog):
     """Заявка создаётся один раз, когда собраны ФИО, телефон и компания."""
     if not (session.contact_name and session.contact_phone and session.contact_company):
         return False
-    if hasattr(session, "lead"):
+    if Lead.objects.filter(session=session).exists():
         return False
     Lead.objects.create(session=session, full_name=session.contact_name, phone=session.contact_phone,
                         company=session.contact_company, summary=summarize(dialog))
@@ -427,9 +489,18 @@ def handle_user_message(session, text):
     dialog.append({"role": "user", "content": text})
     Message.objects.create(session=session, role=Message.USER, content=text)
 
+    lead_created = False
+    if needs_contact_extraction(session, dialog):
+        found = extract_contact(dialog)
+        backup = extract_contact_fallback(dialog)
+        merge_contact(session, {key: found.get(key) or backup[key] for key in backup})
+        print(f"Контакты диалога {str(session.id)[:8]}: ФИО={bool(session.contact_name)}, "
+              f"телефон={bool(session.contact_phone)}, компания={bool(session.contact_company)}", file=sys.stderr)
+        lead_created = create_lead_if_ready(session, dialog)
+
     known = {"full_name": session.contact_name, "phone": session.contact_phone, "company": session.contact_company}
     try:
-        answer, found, sources = generate_reply(dialog, known)
+        answer, found, sources = generate_reply(dialog, known, Lead.objects.filter(session=session).exists())
     except Exception as exc:
         print(f"Ответ: {type(exc).__name__}: {exc}", file=sys.stderr)
         answer, found, sources = FALLBACK, {}, []
@@ -437,7 +508,7 @@ def handle_user_message(session, text):
 
     Message.objects.create(session=session, role=Message.ASSISTANT, content=answer,
                            sources=sources, elapsed_ms=elapsed_ms)
-    merge_contact(session, found)
-    lead_created = create_lead_if_ready(session, dialog + [{"role": "assistant", "content": answer}])
+    merge_contact(session, found)  # запасной путь: служебный блок <lead> из ответа модели
+    lead_created = create_lead_if_ready(session, dialog + [{"role": "assistant", "content": answer}]) or lead_created
     session.save()  # обновляет updated_at
     return {"answer": answer, "sources": sources, "elapsed_ms": elapsed_ms, "lead_created": lead_created}
